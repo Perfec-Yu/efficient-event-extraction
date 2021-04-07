@@ -5,53 +5,6 @@ from transformers import BertConfig, BertModel
 import math
 from torchmeta.modules import MetaConv1d
 
-class BilinearClassifier(nn.Module):
-    def __init__(self,
-                 in1_features,
-                 in2_features,
-                 hidden_features,
-                 out_features,
-                 dropout,
-                 activation):
-        super(BilinearClassifier, self).__init__()
-        self.dropout = nn.Dropout(dropout)
-        self.activation = getattr(torch, activation)
-        self.linear1 = nn.Linear(in1_features, hidden_features)
-        self.linear2 = nn.Linear(in2_features, hidden_features)
-        self.bilinear = FastBiliner(hidden_features, hidden_features, out_features)
-    def forward(self, input1, input2):
-        input1 = self.dropout(self.activation(self.linear1(input1)))
-        input2 = self.dropout(self.activation(self.linear2(input2)))
-        hidden = self.bilinear(input1, input2)
-        hidden_dims = len(hidden.size())
-        permutation = list(range(hidden_dims-3)) + [hidden_dims-2, hidden_dims-1, hidden_dims-3]
-        output = hidden.permute(*permutation)
-        return output
-
-class FastBiliner(nn.Module):
-    def __init__(self, in1_features, in2_features, out_features):
-        super(FastBiliner, self).__init__()
-        weight = torch.randn(out_features, in1_features, in2_features) * math.sqrt(2 / (in1_features + in2_features))
-        bias = torch.ones(out_features) * math.sqrt(2 / (in1_features + in2_features))
-        self.weight = nn.Parameter(weight)
-        self.bias = nn.Parameter(bias)
-        self.out_features = out_features
-        self.in1_features = in1_features
-        self.in2_features = in2_features
-    def forward(self, input1, input2):
-        # B x n x d
-        assert len(input1.size()) == len(input2.size())
-        input_dims = len(input1.size())
-        weight_size = [1] * (input_dims-2) + list(self.weight.size())
-        bias_size = [1] * (input_dims-2) + [self.out_features] + [1, 1]
-        weight = self.weight.view(*weight_size)
-        bias = self.bias.view(*bias_size)
-        input1 = input1.unsqueeze(-3)
-        input2 = input2.unsqueeze(-3).transpose(-2, -1)
-        outputs = bias + torch.matmul(input1,
-                                     torch.matmul(self.weight.unsqueeze(0),
-                                                  input2))
-        return outputs
 
 class Linears(nn.Module):
     """Multiple linear layers with Dropout."""
@@ -77,6 +30,7 @@ class Linears(nn.Module):
             inputs = layer(inputs)
         inputs = self.dropout(inputs)
         return inputs
+
 
 class BERTEncoder(nn.Module):
     def __init__(self,
@@ -146,7 +100,7 @@ class CNNEncoder(BaseTokenEncoder):
         self.truncate = (1 + self.kernel_size) % 2
         # temporal conv
         # self.padding = self.dilation * (self.kernel_size - 1)
-        self.encoder = MetaConv1d(
+        self.encoder = nn.Conv1d(
             in_channels=self.input_size,
             out_channels=self.output_size,
             kernel_size=self.kernel_size,
@@ -155,9 +109,9 @@ class CNNEncoder(BaseTokenEncoder):
             dilation=self.dilation
             )
 
-    def forward(self, sentence, mask=None, params=None): 
+    def forward(self, sentence, mask=None): 
         sentence_length = sentence.size(1)
-        sentence = self.activation(self.encoder(sentence.transpose(1, 2), params=params)).transpose(1, 2)
+        sentence = self.activation(self.encoder(sentence.transpose(1, 2))).transpose(1, 2)
         if mask is None:
             sentence_pooled = F.max_pool1d(sentence.transpose(1, 2), sentence.size(1)).squeeze(2)
         else:
@@ -168,3 +122,58 @@ class CNNEncoder(BaseTokenEncoder):
             sentence = sentence * mask
             sentence_pooled = F.max_pool1d((sentence + (mask - 1) * 100).transpose(1, 2), sentence.size(1)).squeeze(2)
         return sentence, sentence_pooled
+
+
+class TransEncoder(BaseTokenEncoder):
+    def __init__(self, *args, **kwargs):
+        super(TransEncoder, self).__init__(*args, **kwargs)
+        if self.input_size != self.output_size:
+            self.resize = True
+            self.resize_layer = nn.Sequential(
+                nn.Linear(self.input_size, self.output_size),
+                nn.ReLU()
+            )
+        else:
+            self.resize = False
+        if "hidden_size" in kwargs:
+            self.hidden_size = kwargs["hidden_size"]
+        else:
+            self.hidden_size = 2048  
+        if "activation" in kwargs:
+            self.activation = kwargs["activation"]
+        else:
+            self.activation = 'relu'
+        if "num_head" in kwargs:
+            self.num_head = kwargs["num_head"]
+        else:
+            self.num_head = 8
+        if "num_layer" in kwargs:
+            self.num_layer = kwargs["num_layer"]
+        else:
+            self.num_layer = 2
+        if "dropout" in kwargs:
+            self.dropout = kwargs["dropout"]
+        else:
+            self.dropout = 0.1
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.input_size, 
+            nhead=self.num_head,
+            dim_feedforward=self.hidden_size,
+            dropout=self.dropout,
+            activation=self.activation
+            )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer, 
+            num_layers=self.num_layer
+            )
+    
+    def forward(self, sentence, mask=None, src_mask=None, cls_token_pos=0):
+        sentence = sentence.transpose(0, 1)
+        sentence = self.encoder(sentence, mask=src_mask, src_key_padding_mask=~mask)
+        if self.resize:
+            sentence = self.resize_layer(sentence)
+        sentence = sentence.transpose(0, 1)
+        conclusion = sentence[:, cls_token_pos, :]
+        self.output = sentence
+        self.conclusion = conclusion
+        return sentence, conclusion

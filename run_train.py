@@ -1,186 +1,202 @@
-import torch
-from torch.utils.data.dataloader import DataLoader
-from torch.utils.data.dataset import TensorDataset
-from torch.utils.tensorboard import SummaryWriter
-import numpy as np
 import json
+
+from transformers import BatchEncoding, AutoTokenizer
+from models.nets_span import IEToken, IESPAN, IEFromNLI
+import numpy as np
 import os
-from tqdm import tqdm
+import torch
+from transformers.optimization import AdamW, get_scheduler
+from transformers.trainer_pt_utils import get_parameter_names
 
-from utils.optimizer import AdamW
+
+from utils.data import get_data, get_dev_test_encodings
+from utils.utils import F1MetricTag
 from utils.options import parse_arguments
-from utils.datastream import get_stage_loaders
-from utils.worker import Worker
-from models.nets import ZIE
-
-PERM = [[0, 1, 2, 3,4], [4, 3, 2, 1, 0], [0, 3, 1, 4, 2], [1, 2, 0, 3, 4], [3, 4, 0, 1, 2]]
-
-def add_summary_value(writer, key, value, iteration):
-    if writer:
-        writer.add_scalar(key, value, iteration)
+from utils.worker import Worker, GWorker
 
 
-def by_class(preds, labels, learned_labels=None):
-    match = (preds == labels).float()
-    nlabels = max(torch.max(labels).item(), torch.max(preds).item())
-    bc = {}
-
-    ag = 0; ad = 0; am = 0
-    for label in range(1, nlabels+1):
-        lg = (labels==label); ld = (preds==label)
-        lr = torch.sum(match[lg]) / torch.sum(lg.float())
-        lp = torch.sum(match[ld]) / torch.sum(ld.float())
-        lf = 2 * lr * lp / (lr + lp)
-        if torch.isnan(lf):
-            bc[label] = (0, 0, 0)
-        else:
-            bc[label] = (lp.item(), lr.item(), lf.item())
-        if learned_labels is not None and label in learned_labels:
-            ag += lg.float().sum()
-            ad += ld.float().sum()
-            am += match[lg].sum()
-    if learned_labels is None:
-        ag = (labels!=0); ad = (preds!=0)
-        sum_ad = torch.sum(ad.float())
-        if sum_ad == 0:
-            ap = ar = 0
-        else:
-            ar = torch.sum(match[ag]) / torch.sum(ag.float())
-            ap = torch.sum(match[ad]) / torch.sum(ad.float())
-    else:
-        if ad == 0:
-            ap = ar = 0
-        else:
-            ar = am / ag; ap = am / ad
-    if ap == 0:
-        af = ap = ar = 0
-    else:
-        af = 2 * ar * ap / (ar + ap)
-        af = af.item(); ar = ar.item(); ap = ap.item()
-    return bc, (ap, ar, af)
+def create_optimizer_and_scheduler(model:torch.nn.Module, learning_rate:float, weight_decay:float, warmup_step:int, train_step:int, adam_beta1:float=0.9, adam_beta2:float=0.999, adam_epsilon:float=1e-8):
+    decay_parameters = get_parameter_names(model, [torch.nn.LayerNorm])
+    decay_parameters = [name for name in decay_parameters if "bias" not in name]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in model.named_parameters() if n in decay_parameters],
+            "weight_decay": weight_decay,
+        },
+        {
+            "params": [p for n, p in model.named_parameters() if n not in decay_parameters],
+            "weight_decay": 0.0,
+        },
+    ]
+    optimizer_kwargs = {
+        "lr": learning_rate,
+        "betas": (adam_beta1, adam_beta2),
+        "eps": adam_epsilon,
+    }
+    optimizer = AdamW(optimizer_grouped_parameters, **optimizer_kwargs)
+    scheduler = get_scheduler(
+                "linear",
+                optimizer,
+                num_warmup_steps=warmup_step,
+                num_training_steps=train_step,
+            )
+    return optimizer, scheduler
 
 
 def main():
-
     opts = parse_arguments()
+    os.environ["CUDA_VISIBLE_DEVICES"] = f"{opts.gpu}"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    if opts.seed == -1:
+        import time
+        opts.seed = time.time()
     torch.manual_seed(opts.seed)
     np.random.seed(opts.seed)
-    summary = SummaryWriter(opts.log_dir)
+    if opts.gpu.count(",") > 0:
+        opts.batch_size = opts.batch_size * (opts.gpu.count(",")+1)
+        opts.eval_batch_size = opts.eval_batch_size * (opts.gpu.count(",")+1)
+    loaders, label2id = get_data(opts)
+    dev_weak_encoding, dev_encoding, test_encoding = get_dev_test_encodings(opts)
+    if dev_weak_encoding is None:
+        dev_encoding = [dev_encoding]
+    else:
+        dev_encoding = [dev_weak_encoding, dev_encoding]
+    if opts.setting == 'span':
+        IEModel = IESPAN
+    elif opts.setting == "token":
+        IEModel = IEToken
+    elif opts.setting == "nli":
+        IEModel = IEFromNLI
 
-
-    loaders, labels, label_masks = get_stage_loaders(root=opts.json_root,
-        batch_size=opts.batch_size,
-        num_workers=8)
-
-
-    model = ZIE(
-        input_dim=opts.input_dim,
+    model = IEModel(
         hidden_dim=opts.hidden_dim,
-        device=torch.device(torch.device(f'cuda:{opts.gpu}' if torch.cuda.is_available() and (not opts.no_gpu) else 'cpu'))
+        nclass=len(label2id) if opts.setting != "sentence" else len(label2id) - 1,
+        model_name=opts.model_name,
+        distributed=opts.gpu.count(",") > 0
     )
-    model.set_labels(labels, label_masks)
 
-    param_groups = [
-        {"params": [param for name, param in model.named_parameters() if param.requires_grad and 'bert' not in name],
-        "lr":opts.learning_rate,
-        "weight_decay": opts.decay,
-        "betas": (0.9, 0.999)},
-        {"params": [param for name, param in model.named_parameters() if param.requires_grad and 'bert' in name],
-        "lr":opts.bert_learning_rate,
-        "weight_decay": opts.bert_decay,
-        "betas": (0.9, 0.98)}
-        ]
-    optimizer = AdamW(params=param_groups)
-    worker = Worker(opts)
+    if opts.gpu.count(",") > 0:
+        model = torch.nn.DataParallel(model)
+        print('para')
+
+    model.to(torch.device('cuda:0') if torch.cuda.is_available() and (not opts.no_gpu) else torch.device('cpu'))
+
+    if not opts.test_only:
+        optimizer, scheduler = create_optimizer_and_scheduler(model, opts.learning_rate, opts.decay, opts.warmup_step, len(loaders[0]) * opts.train_epoch // opts.accumulation_steps)
+    else:
+        optimizer = scheduler = None
+
+    worker = GWorker(opts) if opts.example_regularization else Worker(opts)
     worker._log(str(opts))
-    if opts.test_only:
+    worker._log(json.dumps(label2id))
+    if opts.continue_train:
+        worker.load(model, optimizer, scheduler)
+    elif opts.test_only:
         worker.load(model)
-    best_dev = best_test = None
-    collect_stats = "accuracy"
+    best_test = [None for _ in range(len(loaders)-2)]
+    best_dev = [None for _ in range(len(loaders)-2)]
+    test_metrics = None
+    dev_metrics = []
+    metric = "f1"
     collect_outputs = {"prediction", "label"}
     termination = False
     patience = opts.patience
-    no_better = 0
-    loader_id = 0
+    no_better = [0 for _ in range(len(loaders)-2)]
     total_epoch = 0
 
-    dev_metrics = None
-    test_metrics = None
+    F1Metric = F1MetricTag(-100, [0], label2id, AutoTokenizer.from_pretrained(opts.model_name))
+
+    print("start training")
     while not termination:
         if not opts.test_only:
-            train_loss = lambda batch:model.forward(batch)
+            f_loss = None
             epoch_loss, epoch_metric = worker.run_one_epoch(
                 model=model,
-                f_loss=train_loss,
-                loader=loaders[loader_id],
+                f_loss=f_loss,
+                loader=loaders[0],
                 split="train",
                 optimizer=optimizer,
-                collect_stats=collect_stats,
-                prog=loader_id)
+                scheduler=scheduler,
+                metric=metric,
+                max_steps=-200)
             total_epoch += 1
 
             for output_log in [print, worker._log]:
                 output_log(
                     f"Epoch {worker.epoch:3d}  Train Loss {epoch_loss} {epoch_metric}")
+            
+            dev_metrics = []
+            for idev, dev_loader in enumerate(loaders[1:-1]):
+                _, dev_met = worker.run_one_epoch(
+                    model=model,
+                    loader=dev_loader,
+                    split="dev",
+                    metric=metric,
+                    max_steps=-1,
+                    collect_outputs=collect_outputs)
+                if dev_met is None:
+                    dev_met = F1Metric(worker.epoch_outputs, dev_encoding[idev])
+                dev_metrics.append(dev_met)
         else:
 
             termination = True
-
-        score_fn = model.forward
-        dev_loss, dev_metrics = worker.run_one_epoch(
+        
+        _, test_metrics = worker.run_one_epoch(
             model=model,
-            f_loss=score_fn,
-            loader=loaders[-2],
-            split="dev",
-            collect_stats=collect_stats,
-            collect_outputs=collect_outputs)
-        dev_outputs = {k: torch.cat(v, dim=0) for k,v in worker.epoch_outputs.items()}
-        dev_scores, (dev_p, dev_r, dev_f) = by_class(dev_outputs["prediction"], dev_outputs["label"])
-        dev_class_f1 = {k: dev_scores[k][2] for k in dev_scores}
-        for k,v in dev_class_f1.items():
-            add_summary_value(summary, f"dev_class_{k}", v, total_epoch)
-        dev_metrics = dev_f
-        for output_log in [print, worker._log]:
-            output_log(
-                f"Epoch {worker.epoch:3d}:  Dev {dev_metrics}"
-            )
-        test_loss, test_metrics = worker.run_one_epoch(
-            model=model,
-            f_loss=score_fn,
             loader=loaders[-1],
             split="test",
-            collect_stats=collect_stats,
+            metric=metric,
             collect_outputs=collect_outputs)
-        test_outputs = {k: torch.cat(v, dim=0) for k,v in worker.epoch_outputs.items()}
-        torch.save(test_outputs, f"log/{os.path.basename(opts.load_model)}.output")
-        test_scores, (test_p, test_r, test_f) = by_class(test_outputs["prediction"], test_outputs["label"])
-        test_class_f1 = {k: test_scores[k][2] for k in test_scores}
-        for k,v in test_class_f1.items():
-            add_summary_value(summary, f"test_class_{k}", v, total_epoch)
-        test_metrics = test_f
+        test_outputs = worker.epoch_outputs
+        if test_metrics is None:
+            test_metrics = F1Metric(worker.epoch_outputs, test_encoding)
+        for k in test_outputs:
+            if isinstance(test_outputs[k], list) and isinstance(test_outputs[k][0], list):
+                test_outputs[k] = [tt for t in test_outputs[k] for tt in t]
+        try:
+            test_outputs = {k: torch.cat(v, dim=0) for k,v in worker.epoch_outputs.items()}
+        except Exception as e:
+            print(f"Outputs not concatable due to {e}, save as list")
+        finally:
+            save_path = os.path.join(opts.log_dir, f"{opts.run_fold}.output")
+            print(save_path)
+            torch.save(test_outputs, save_path)
+        dev_log = ''
+        for i, dev_met in enumerate(dev_metrics):
+            dev_log += f'Dev_{i} {dev_met}|' 
         for output_log in [print, worker._log]:
             output_log(
-                f"Epoch {worker.epoch:3d}: Test {test_metrics}"
+                f"Epoch {worker.epoch:3d}: {dev_log}"
+                f"Test {test_metrics.full_result}"
             )
-        torch.save(test_outputs, "log/outputs")
 
         if not opts.test_only:
-            if best_dev is None or dev_metrics > best_dev:
-                best_dev = dev_metrics
-                worker.save(model, optimizer, postfix=str(loader_id))
-                best_test = test_metrics
-                no_better = 0
-            else:
-                no_better += 1
-            print(f"patience: {no_better} / {patience}")
-
-            if (no_better == patience) or (worker.epoch == worker.train_epoch):
-                loader_id += 1
-                no_better = 0
+            for i in range(len(dev_metrics)):
+                if (best_dev[i] is None or dev_metrics[i] > best_dev[i]) and no_better[i] < patience:
+                    best_dev[i] = dev_metrics[i]
+                    if len(dev_metrics) == 1:
+                        worker.save(model, optimizer, scheduler, postfix=f"best.{opts.run_fold}")
+                    else:
+                        worker.save(model, optimizer, scheduler, postfix=f"best.{opts.run_fold}.dev_{i}")
+                    best_test[i] = test_metrics
+                    no_better[i] = 0
+                else:
+                    no_better[i] += 1
+            print(f"Current: {', '.join([str(t) for t in dev_metrics])} | History Best:{', '.join([str(t) for t in best_dev])} | Patience: {no_better} : {patience}")
+            if (worker.epoch+1) % 10 == 0:
+                worker.save(model, optimizer, scheduler, postfix=str((worker.epoch+1) // 10))
+            if all([nb >= patience for nb in no_better]) or (worker.epoch > worker.train_epoch):
+                dev_log = ''
+                for i, dev_met in enumerate(best_dev):
+                    dev_log += f'{dev_met.full_result},'
+                test_log = ''
+                for i, test_met in enumerate(best_test):
+                    test_log += f'{test_met.full_result},'
                 for output_log in [print, worker._log]:
-                    output_log(f"BEST DEV {loader_id-1}: {best_dev if best_dev is not None else 0}")
-                    output_log(f"BEST TEST {loader_id-1}: {best_test if best_test is not None else 0}")
+                    output_log(f"BEST DEV : [{dev_log}]")
+                    output_log(f"BEST TEST: [{test_log}]")
                 termination = True
+
 
 if __name__ == "__main__":
     main()

@@ -137,6 +137,10 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# data
+# data and scripts
 data/
 log/
+cached/
+shells/
+utils/default_options.py
+workspace.code-workspace
