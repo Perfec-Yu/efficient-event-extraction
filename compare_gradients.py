@@ -52,8 +52,6 @@ def main():
         IEModel = IEToken
     elif opts.setting == "nli":
         IEModel = IEFromNLI
-    elif opts.setting == "sentence":
-        IEModel = IESentence
 
     model = IEModel(
         hidden_dim=opts.hidden_dim,
@@ -115,8 +113,6 @@ def main():
             print(ws_data[idx])
         zero_grad(model)
     json.dump(discarded, open("data/discarded_ws.json", "wt"), indent=4)
-        
-
 
 
 if __name__ == "__main__":
