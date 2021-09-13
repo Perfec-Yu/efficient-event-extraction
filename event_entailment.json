@@ -1,0 +1,167 @@
+{
+    "Movement:Transport": {
+        "definition": "an artifact (weapon or vehicle) or a person is moved from one place to another",
+        "id": 2,
+        "entailment": "Agent> transported Artifact>"
+    },
+    "Personnel:Elect": {
+        "definition": "a candidate wins an election designed to determine a position for an organization or government",
+        "id": 5,
+        "entailment": "Entity> elected Person>"
+    },
+    "Personnel:Start-Position": {
+        "definition": "a person begins working for (or changes offices within) an organization or government",
+        "id": 13,
+        "entailment": "Person> started working at Entity>"
+    },
+    "Personnel:Nominate": {
+        "definition": "a person is proposed for a job or position in an organization or government by the appropriate person, through official channels",
+        "id": 28,
+        "entailment": "Agent> nominated Person>"
+    },
+    "Personnel:End-Position": {
+        "definition": " a person stops working for (or changes offices within) an organization or government",
+        "id": 6,
+        "entailment": "Person> stopped working at Entity>"
+    },
+    "Conflict:Attack": {
+        "definition": "a violent physical act causing harm or damage",
+        "id": 1,
+        "entailment": "Attacker> attacked Target>"
+    },
+    "Contact:Meet": {
+        "definition": "two or more entities come together at a single location and interact with one another face-to-face",
+        "id": 4,
+        "entailment": "Entity> met with Entity>"
+    },
+    "Life:Marry": {
+        "definition": "two people are married under the legal definition",
+        "id": 19,
+        "entailment": "Person> married Person>"
+    },
+    "Transaction:Transfer-Money": {
+        "definition": "the giving, receiving, borrowing, or lending money when it is not in the context of purchasing something",
+        "id": 7,
+        "entailment": "Giver> gave money to Recipient>"
+    },
+    "Conflict:Demonstrate": {
+        "definition": "a large number of people come together in a public area to protest or demand some sort of official action, including, but are not limited to, protests, sit-ins, strikes, and riots.",
+        "id": 16,
+        "entailment": "Entity> demonstrated"
+    },
+    "Business:End-Org": {
+        "definition": "an ORGANIZATION ceases to exist (in other words \u2018goes out of business\u2019)",
+        "id": 23,
+        "entailment": "Org> shut down"
+    },
+    "Justice:Sue": {
+        "definition": "a court proceeding has been initiated for the purposes of determining the liability of a person, organization accused of committing a crime or neglecting a commitment",
+        "id": 17,
+        "entailment": "Plaintiff> sued Defendant>"
+    },
+    "Life:Injure": {
+        "definition": "a person experiences physical harm",
+        "id": 8,
+        "entailment": "Agent> injured Victim>"
+    },
+    "Life:Die": {
+        "definition": "the life of a person ends",
+        "id": 3,
+        "entailment": "Agent> killed Victim>"
+    },
+    "Justice:Arrest-Jail": {
+        "definition": "the movement of a person is constrained by a state actor, or a state actor takes official custody of a person for the purposes of evaluating legal liability in a criminal activity",
+        "id": 15,
+        "entailment": "Agent> arrested Person>"
+    },
+    "Contact:Phone-Write": {
+        "definition": "two or more people directly engage in discussion which does not take place face-to-face",
+        "id": 9,
+        "entailment": "Entity> communicated remotely with Entity>"
+    },
+    "Transaction:Transfer-Ownership": {
+        "definition": "the buying, selling, loaning, borrowing, giving, or receiving of artifacts or organizations",
+        "id": 12,
+        "entailment": "Seller> gave Artifact> to Buyer>"
+    },
+    "Business:Start-Org": {
+        "definition": "a new organization is created",
+        "id": 25,
+        "entailment": "Agent> started Org>"
+    },
+    "Justice:Execute": {
+        "definition": "the life of a PERSON is taken by a state actor",
+        "id": 26,
+        "entailment": "Agent> executed Person>"
+    },
+    "Justice:Trial-Hearing": {
+        "definition": "a court proceeding has been initiated for the purposes of determining the guilt or innocence of a person, organization accused of committing a crime, or a state actor officially gathers to discuss some criminal legal matter",
+        "id": 11,
+        "entailment": "Prosecutor> tried Defendant>"
+    },
+    "Life:Be-Born": {
+        "definition": "a person is given birth to.",
+        "id": 21,
+        "entailment": "Person> was born"
+    },
+    "Justice:Charge-Indict": {
+        "definition": "a person or organization is accused of a crime by a state actor, or a state actor takes official legal action to follow up on an accusation",
+        "id": 10,
+        "entailment": "Prosecutor> charged or indicted Defendant>"
+    },
+    "Justice:Convict": {
+        "definition": "a person or organization has been found guilty of a crime",
+        "id": 18,
+        "entailment": "Adjudicator> convicted Defendant>"
+    },
+    "Justice:Sentence": {
+        "definition": "the punishment (particularly incarceration) for the defendent of a trial is issued by a state actor",
+        "id": 14,
+        "entailment": "Adjudicator> sentenced Defendant>"
+    },
+    "Business:Declare-Bankruptcy": {
+        "definition": "an Entity officially requests legal protection from debt collection due to an extremely negative balance sheet",
+        "id": 22,
+        "entailment": "Org> declared bankruptcy"
+    },
+    "Justice:Release-Parole": {
+        "definition": "a state actor ends its custody of a person",
+        "id": 20,
+        "entailment": "Entity> released or paroled Person>"
+    },
+    "Justice:Fine": {
+        "definition": "a state actor issues a financial punishment to a person or organization, typically as a result of court proceedings",
+        "id": 27,
+        "entailment": "Adjudicator> fined Entity>"
+    },
+    "Justice:Pardon": {
+        "definition": "a head-of-state or their appointed representative lifts a sentence imposed by the judiciary",
+        "id": 33,
+        "entailment": "Adjudicator> pardoned Defendant>"
+    },
+    "Justice:Appeal": {
+        "definition": "the decision of a court is taken to a higher court for review",
+        "id": 24,
+        "entailment": "Plaintiff> appealed to Adjudicator>"
+    },
+    "Justice:Extradite": {
+        "definition": "a person is sent by a state actor from one place to another place for the purposes of legal proceedings there",
+        "id": 31,
+        "entailment": "Agent> extradited Person>"
+    },
+    "Life:Divorce": {
+        "definition": "two people are officially divorced under the legal definition of divorce",
+        "id": 30,
+        "entailment": "Person> divorced Person>"
+    },
+    "Business:Merge-Org": {
+        "definition": "two or more organization come together to form a new organization",
+        "id": 29,
+        "entailment": "Org> merged with Org>"
+    },
+    "Justice:Acquit": {
+        "definition": "a trial ends but fails to produce a conviction",
+        "id": 32,
+        "entailment": "Adjudicator> acquitted Defendant>"
+    }
+}
