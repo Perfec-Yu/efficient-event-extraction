@@ -129,6 +129,11 @@ class F1Record(Record):
         recall = self.value[2] / max(self.value[0], 1)
         f1 = self.value[2] * 2/ max(self.value[0] + self.value[1], 1)
         return precision, recall, f1
+    
+    @property
+    def named_result(self,):
+        precision, recall, f1 = self.full_result
+        return {"precision": precision, "recall": recall, "f1":f1}
 
 class F1MetricTag(object):
 
@@ -136,7 +141,7 @@ class F1MetricTag(object):
     BIO_match = re.compile(r'(?P<start>\d+)B-(?P<label>[a-z]+)\s(?:(?P<end>\d+)I-(?P=label)\s)*')
     IO_match = re.compile(r'(?P<start>\d+)I-(?P<label>[a-z]+)\s(?:(?P<end>\d+)I-(?P=label)\s)*')
 
-    def __init__(self, pad_value:int, ignore_labels:Optional[Union[int, List[int], Set[int]]], label2id:Dict[str, int], tokenizer:Optional[PreTrainedTokenizerFast]=None, save_dir:Optional[str]=None) -> None:
+    def __init__(self, pad_value:int, ignore_labels:Optional[Union[int, List[int], Set[int]]], label2id:Dict[str, int], tokenizer:Optional[PreTrainedTokenizerFast]=None, save_dir:Optional[str]=None, save_output:bool=True, save_annotation:bool=True, return_annotation:bool=False) -> None:
         if isinstance(ignore_labels, int):
             self.ignore_labels = {ignore_labels}
         elif ignore_labels is None:
@@ -161,6 +166,19 @@ class F1MetricTag(object):
             else:
                 self.id2tag[id_] = f'I-{nickname}'
         self.tokenizer = tokenizer
+        self.save_annotation = save_annotation
+        self.save_output = save_output
+        self.return_annotation = return_annotation
+    
+    def _merge_consecutive_two_token(self, first_input_id:int, second_input_id:int):
+        first_input_id = int(first_input_id)
+        second_input_id = int(second_input_id)
+        if isinstance(self.tokenizer, transformers.RobertaTokenizerFast):
+            return (not self.tokenizer.convert_ids_to_tokens(second_input_id).startswith(chr(288))) and \
+                self.tokenizer.convert_ids_to_tokens(first_input_id)[-1].isalpha() and \
+                self.tokenizer.convert_ids_to_tokens(second_input_id)[0].isalpha()
+        elif isinstance(self.tokenizer, transformers.BertTokenizerFast):
+            return self.tokenizer.convert_ids_to_tokens(second_input_id).startswith('##')
 
     @classmethod
     def find_offsets(cls, seq_str:str, match:re.Pattern):
@@ -211,33 +229,44 @@ class F1MetricTag(object):
             sequences.append(" ".join([f'{offset}{self.id2tag[token]}' for offset, token in enumerate(sequence)]) + " ")
         return sequences
     
-    def save_annotations(self, predictions:List[Union[List[Tuple[int, int, str]], Set[Tuple[int, int, str]]]], encodings:List[BatchEncoding]) -> None:
-        with open(os.path.join(self.save_dir, "prediction.jsonl"), "wt") as fw:
-            for prediction, encoding in zip(predictions, encodings):
-                annotations = []
-                for annotation in prediction:
-                    start_pt = annotation[0]
-                    end_pt = annotation[1]
+    def annotate(self, predictions:List[Union[List[Tuple[int, int, str]], Set[Tuple[int, int, str]]]], encodings:Union[List[BatchEncoding], BatchEncoding],save:bool=True) -> None:
+        fw = None
+        if save: fw = open(os.path.join(self.save_dir, "prediction.jsonl"), "wt")
+        corpus_annotations = []
+        for i, prediction in enumerate(predictions):
+            if isinstance(encodings, list):
+                encoding = encodings[i]
+            annotations = []
+            for annotation in prediction:
+                start_pt = annotation[0]
+                end_pt = annotation[1]
+                if isinstance(encodings, list):
                     start = encoding.token_to_chars(start_pt).start
                     end = encoding.token_to_chars(end_pt-1).end
-                    annotations.append([start, end, annotation[2]])
+                else:
+                    start = encodings.token_to_chars(i, start_pt).start
+                    end = encodings.token_to_chars(i, end_pt-1).end
+                annotations.append([start, end, annotation[2]])
+            if save:
                 fw.write(json.dumps({"annotations": annotations})+"\n")
+            corpus_annotations.append(annotations)
+        if save: fw.close()
+        return corpus_annotations
     
     def fix_spans(self, predictions:List[Union[List[Tuple[int, int, str]], Set[Tuple[int, int, str]]]], encodings:List[BatchEncoding]) -> List[Set[Tuple[int, int, str]]]:
-        if not isinstance(self.tokenizer, transformers.RobertaTokenizerFast):
-            return predictions
         fixed = []
-        for prediction, encoding in zip(predictions, encodings):
+        for i, prediction in enumerate(predictions):
+            encoding = encodings[i]
+            input_ids = getattr(encoding, 'input_ids', getattr(encoding, 'ids', None))
             annotations = set()
             for annotation in prediction:
                 start_pt = annotation[0]
                 end_pt = annotation[1]
-                while start_pt > 1 and self.tokenizer.decode(encoding.input_ids[start_pt])[0].isalnum():
-                    if self.tokenizer.decode(encoding.input_ids[start_pt-1])[-1].isalpha():
-                        start_pt -= 1
-                    else:
-                        break
-                while end_pt < len(encoding.input_ids) - 1 and self.tokenizer.decode(encoding.input_ids[end_pt])[0].isalnum():
+                if start_pt >= len(input_ids) - 1 or start_pt == 0 or end_pt >= len(input_ids):
+                    continue
+                while start_pt > 1 and self._merge_consecutive_two_token(input_ids[start_pt-1], input_ids[start_pt]):
+                    start_pt -= 1
+                while end_pt < len(input_ids) - 1 and self._merge_consecutive_two_token(input_ids[end_pt-1], input_ids[end_pt]):
                     end_pt += 1
                 annotations.add((start_pt, end_pt, annotation[2]))
             fixed.append(annotations)
@@ -245,37 +274,62 @@ class F1MetricTag(object):
 
     def __call__(self, outputs:Dict[str, Any], encodings:Optional[List[BatchEncoding]]=None) -> Dict[str, float]:
         predictions = outputs['prediction']
-        labels = outputs['label']
-
         predictions = self._preprocess(predictions)
-        labels = self._preprocess(labels)
-        
         predictions = [self.collect_spans(prediction) for prediction in predictions]
-        labels = [self.collect_spans(label) for label in labels]
+
+        labels = None
+        if 'label' in outputs:
+            labels = outputs['label']
+            if labels is not None:
+                labels = self._preprocess(labels)
+                labels = [self.collect_spans(label) for label in labels]
+        
         if self.tokenizer is not None and encodings is not None:
             predictions = self.fix_spans(predictions, encodings)
-        if self.save_dir is not None:
-            save_output = os.path.join(self.save_dir, "output.th")
-            torch.save([predictions, labels], save_output)
-            print(f"save to {save_output}")
-            if encodings is not None:
-                self.save_annotations(predictions, encodings)
-
-        nprediction = sum([len(prediction_spans) for prediction_spans in predictions])
-        nlabel = sum([len(label_spans) for label_spans in labels])
-        nmatch = sum([len(label_spans.intersection(prediction_spans)) for prediction_spans, label_spans in zip(predictions, labels)])
-
+        
         metric = F1Record()
-        metric += np.array([nlabel, nprediction, nmatch])
-        return metric
-        # return {"precision": nmatch / max(1, nprediction), "recall": nmatch / max(1, nlabel), "f1": 2 * nmatch / max(1, nprediction + nlabel)}
+        metric_by_label = {}
+        if labels is not None:
+            prediction_spans = {tuple([i]+list(prediction_span)) for i, prediction_spans in enumerate(predictions) for prediction_span in prediction_spans}
+            label_spans = {tuple([i]+list(label_span)) for i, label_spans in enumerate(labels) for label_span in label_spans}
+            nprediction = len(prediction_spans)
+            nlabel = len(label_spans)
+            nmatch = len(prediction_spans.intersection(label_spans))
+            # nprediction = sum([len(prediction_spans) for prediction_spans in predictions])
+            # nlabel = sum([len(label_spans) for label_spans in labels])
+            # nmatch = sum([len(label_spans.intersection(prediction_spans)) for prediction_spans, label_spans in zip(predictions, labels)])
+            metric += np.array([nlabel, nprediction, nmatch])      
+            for label in self.label2id:
+                ffunc = lambda t:t[3]==label
+                nprediction = len(list(filter(ffunc, prediction_spans)))
+                nlabel = len(list(filter(ffunc, label_spans)))
+                nmatch = len(list(filter(ffunc, prediction_spans.intersection(label_spans))))
+                metric_by_label[label] = [nlabel, nprediction, nmatch]
+
+        annotations = None
+        if self.save_dir is not None:
+            if self.save_output:
+                save_output = os.path.join(self.save_dir, "output.th")
+                torch.save({'prediction': predictions, 'labels': labels, 'metric': metric, 'metric_by_label': metric_by_label}, save_output)
+                print(f"save to {save_output}")
+            if self.save_annotation and encodings is not None:
+                annotations = self.annotate(predictions, encodings, save=True)
+        if annotations is None and self.return_annotation:
+            annotations = self.annotate(predictions, encodings, save=False)
+
+        if self.return_annotation:
+            return metric, metric_by_label, annotations
+        else:
+            return metric, metric_by_label
 
 class WSAnnotations(object):
     
-    def __init__(self, threshold:float, uthreshold:float, tokenizer:PreTrainedTokenizerFast, label2id:Dict[str, int], id2label:Optional[Dict[int, str]]=None, with_special_tokens:bool=True):
+    def __init__(self, threshold:float, tokenizer:PreTrainedTokenizerFast, label2id:Dict[str, int], uthreshold:Optional[float]=None, id2label:Optional[Dict[int, str]]=None, save_dir:Optional[str]=None):
         self.threshold = threshold
-        self.uthreshold = uthreshold
-        self.with_special_tokens = with_special_tokens
+        if uthreshold is None:
+            self.uthreshold = threshold
+        else:
+            self.uthreshold = uthreshold
         self.tokenizer = tokenizer
         self.label2id = label2id
         if id2label is None:
@@ -286,6 +340,16 @@ class WSAnnotations(object):
             self.id2label = id2label
             self.label2id['CND'] = max(len(label2id), len(id2label))
             self.id2label[max(len(label2id), len(id2label))] = 'CND'
+        self.rlabel2id = {v:k for k,v in label2id.items()}
+        self.f1_tagger = F1MetricTag(
+            pad_value=-100,
+            ignore_labels=0,
+            label2id=self.label2id,
+            tokenizer=self.tokenizer,
+            save_dir=save_dir,
+            save_output=False,
+            save_annotation=False,
+            return_annotation=True)
         
     
     def collect(self, pieces, pred):
@@ -318,51 +382,72 @@ class WSAnnotations(object):
                         span = []
         return spans
     
-    def annotate(self, input_ids:torch.LongTensor, outputs:Optional[torch.FloatTensor]=None, tokenizer:Optional[PreTrainedTokenizerFast]=None, with_special_tokens:Optional[bool]=None, return_offset:Optional[str]='char'):
+    def annotate(self, input_ids:Union[torch.LongTensor, List[transformers.BatchEncoding]], outputs:Optional[torch.FloatTensor]=None, tokenizer:Optional[PreTrainedTokenizerFast]=None, return_offset:Optional[str]='char'):
+        encodings = None
         if outputs is None:
             input_ids, outputs = input_ids
-        if with_special_tokens is None:
-            with_special_tokens = self.with_special_tokens
         if tokenizer is None:
             tokenizer = self.tokenizer
-        if isinstance(input_ids, list):
-            input_ids = self.tokenizer(input_ids, add_special_tokens=True, truncation=True, padding=True, max_length=80, is_split_into_words=True, return_tensors='pt').input_ids
+        if isinstance(input_ids, transformers.BatchEncoding):
+            encodings = input_ids
+            input_ids = encodings.input_ids
+        elif isinstance(input_ids[0], transformers.BatchEncoding):
+            encodings = input_ids
+            input_ids = self.tokenizer.pad(encodings, return_tensors='pt').input_ids
         if outputs.size(1) > input_ids.size(1):
             outputs = outputs[:, :input_ids.size(1), :]
         
         val, pred = torch.max(outputs, dim=-1)
-        mask = val > self.threshold
-        umask = (val <= self.threshold) & (val > self.uthreshold)
         pred = pred + 1
-        pred[~mask] = 0
-        pred[umask] = self.label2id['CND']
+        if isinstance(self.threshold, float):
+            mask = val > self.threshold
+            umask = (val <= self.threshold) & (val > self.uthreshold)
+            pred[~mask] = 0
+            pred[umask] = self.label2id['CND']
+        else:
+            for label_id, label in self.id2label.items():
+                if label_id == 0 or label == 'CND':
+                    continue
+                mask = val > self.threshold[label]
+                umask = (val <= self.threshold[label]) & (val > self.uthreshold[label])
+                label_pred = pred == label_id
+                pred[label_pred & (~mask)] = 0
+                pred[label_pred & umask] = self.label2id['CND']
+
+        for idx, label in self.id2label.items():
+            pred[pred==idx] = self.label2id[label]
+
         if tokenizer.pad_token_id is not None:
             pred[input_ids==tokenizer.pad_token_id] = -100
         if tokenizer.cls_token_id is not None:
-            pred[input_ids==tokenizer.cls_token] == -100
+            pred[input_ids==tokenizer.cls_token_id] = 0
         if tokenizer.sep_token_id is not None:
-            pred[input_ids==tokenizer.sep_token] == -100
-            end_of_inputs = input_ids == tokenizer.sep_token_id
-        instances = []
-        for i in range(input_ids.size(0)):
-            pieces = tokenizer.convert_ids_to_tokens(input_ids[i], skip_special_tokens=True)
-            output = pred[i, 1:len(pieces)+1]
-            span = self.collect(pieces, output)
-            sentence = ''
-            index = 0
-            annotations = []
-            for label_id, start, end in span:
-                if index >= 0 and index < start:
+            pred[input_ids==tokenizer.sep_token_id] = -100
+        
+        if encodings is not None:
+            metric, _, annotations = self.f1_tagger({'prediction': pred}, encodings=encodings)
+            instances = [{'tokens':None, 'annotations': annotation} for annotation in annotations]
+        else:
+            instances = []
+            for i in range(input_ids.size(0)):
+                pieces = tokenizer.convert_ids_to_tokens(input_ids[i], skip_special_tokens=True)
+                output = pred[i, 1:len(pieces)+1]
+                span = self.collect(pieces, output)
+                sentence = ''
+                index = 0
+                annotations = []
+                for label_id, start, end in span:
+                    if index >= 0 and index < start:
+                        if index > 0:
+                            sentence += " "
+                        sentence += tokenizer.convert_tokens_to_string(pieces[index:start])
+                    text = tokenizer.convert_tokens_to_string(pieces[start:end])
+                    annotations.append([len(sentence)+1, len(sentence) + len(text) + 1, self.rlabel2id[label_id], text])
+                    sentence += f" {text}"
+                    index = end
+                if index < len(pieces):
                     if index > 0:
                         sentence += " "
-                    sentence += tokenizer.convert_tokens_to_string(pieces[index:start])
-                text = tokenizer.convert_tokens_to_string(pieces[start:end])
-                annotations.append([len(sentence)+1, len(sentence) + len(text) + 1, self.id2label[label_id], text])
-                sentence += f" {text}"
-                index = end
-            if index < len(pieces):
-                if index > 0:
-                    sentence += " "
-                sentence += tokenizer.convert_tokens_to_string(pieces[index:])
-            instances.append({'tokens': sentence, 'annotations': annotations})
+                    sentence += tokenizer.convert_tokens_to_string(pieces[index:])
+                instances.append({'tokens': sentence, 'annotations': annotations})
         return instances

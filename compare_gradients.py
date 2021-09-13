@@ -110,7 +110,6 @@ def main():
         dot = compute_inner_product(model, grads)
         if dot < 0:
             discarded.append(ws_data[idx])
-            print(ws_data[idx])
         zero_grad(model)
     json.dump(discarded, open("data/discarded_ws.json", "wt"), indent=4)
 

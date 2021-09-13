@@ -104,7 +104,8 @@ def main():
     no_better = [0 for _ in range(len(loaders)-2)]
     total_epoch = 0
 
-    F1Metric = F1MetricTag(-100, [0], label2id, AutoTokenizer.from_pretrained(opts.model_name))
+    # [0,1,2,3,4,5,6,7,12,14,15] are ignored labels for comparison with zero-shot ee
+    F1Metric = F1MetricTag(-100, [0,1,2,3,4,5,6,7,12,14,15][0], label2id, AutoTokenizer.from_pretrained(opts.model_name), save_dir=opts.log_dir)
 
     print("start training")
     while not termination:
@@ -135,7 +136,7 @@ def main():
                     max_steps=-1,
                     collect_outputs=collect_outputs)
                 if dev_met is None:
-                    dev_met = F1Metric(worker.epoch_outputs, dev_encoding[idev])
+                    dev_met, dev_met_by_label = F1Metric(worker.epoch_outputs, dev_encoding[idev])
                 dev_metrics.append(dev_met)
         else:
 
@@ -149,18 +150,18 @@ def main():
             collect_outputs=collect_outputs)
         test_outputs = worker.epoch_outputs
         if test_metrics is None:
-            test_metrics = F1Metric(worker.epoch_outputs, test_encoding)
-        for k in test_outputs:
-            if isinstance(test_outputs[k], list) and isinstance(test_outputs[k][0], list):
-                test_outputs[k] = [tt for t in test_outputs[k] for tt in t]
-        try:
-            test_outputs = {k: torch.cat(v, dim=0) for k,v in worker.epoch_outputs.items()}
-        except Exception as e:
-            print(f"Outputs not concatable due to {e}, save as list")
-        finally:
-            save_path = os.path.join(opts.log_dir, f"{opts.run_fold}.output")
-            print(save_path)
-            torch.save(test_outputs, save_path)
+            test_metrics, test_metrics_by_label = F1Metric(worker.epoch_outputs, test_encoding)
+        # for k in test_outputs:
+        #     if isinstance(test_outputs[k], list) and isinstance(test_outputs[k][0], list):
+        #         test_outputs[k] = [tt for t in test_outputs[k] for tt in t]
+        # try:
+        #     test_outputs = {k: torch.cat(v, dim=0) for k,v in worker.epoch_outputs.items()}
+        # except Exception as e:
+        #     print(f"Outputs not concatable due to {e}, save as list")
+        # finally:
+        #     save_path = os.path.join(opts.log_dir, f"{opts.run_fold}.output")
+        #     print(save_path)
+        #     torch.save(test_outputs, save_path)
         dev_log = ''
         for i, dev_met in enumerate(dev_metrics):
             dev_log += f'Dev_{i} {dev_met}|' 
@@ -169,6 +170,9 @@ def main():
                 f"Epoch {worker.epoch:3d}: {dev_log}"
                 f"Test {test_metrics.full_result}"
             )
+        print(test_metrics_by_label)
+        macro = sum([v[2] * 2 / max(v[0] + v[1],1) for v in test_metrics_by_label.values()]) / len(test_metrics_by_label)
+        print(macro)
 
         if not opts.test_only:
             for i in range(len(dev_metrics)):

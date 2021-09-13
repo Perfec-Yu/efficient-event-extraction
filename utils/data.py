@@ -493,6 +493,7 @@ def get_dataset(
     split_nearest_data = False and example_regularization and weakly_supervised
     add_example_to_train = example_training and not example_regularization
     add_example_to_dev = example_validation and not example_training and not example_validation
+    train_with_subset = example_ratio < 0 and example_ratio > -1
 
     build_train_dev_dataset = not test_only
 
@@ -540,6 +541,8 @@ def get_dataset(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     print("processing files...")
+    if train is not None and len(train) < 19216 // 2:
+        train = train * (19216 // len(train))
 
     if split_nearest_data:
         train_nearest = dict(zip([t.sentence_id for t in train], nearest_examples))
@@ -553,6 +556,15 @@ def get_dataset(
 
     if add_example_to_dev:
         dev = dev + example
+    
+    if train_with_subset:
+        subset_portion = 1 + example_ratio
+        train_num = round(len(train) * subset_portion)
+        print(train_num)
+        generator = np.random.default_rng(seed)
+        for _ in range(len(train)): generator.random()
+        generator.shuffle(train)
+        train = train[:train_num]
 
     print("building pytorch datasets...")
     if build_train_dev_dataset:

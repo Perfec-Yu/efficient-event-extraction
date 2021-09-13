@@ -467,6 +467,7 @@ def keyword_matching(id:int, encodings:List[BatchEncoding], keyword_vectors:torc
     elif model is None or tokenizer is None:
         raise ValueError("need either model name or loaded model/tokenizer")
     model = model.cuda(f"cuda:{id}")
+    print(th)
     annotator = WSAnnotations(threshold=th, tokenizer=tokenizer, label2id=label2id, id2label=keywordid2label, uthreshold=uth)
     with torch.no_grad():
         keyword_vectors = keyword_vectors.cuda(f"cuda:{id}")
@@ -819,9 +820,11 @@ def main():
             path = args.evaluation_json
         _, dataloader = get_dataset_and_loader(path, label2id=label2id, method="token", model_name=args.model_name)
         model = AutoModel.from_pretrained(args.model_name)
-        best_th = {"kw": -1, "cluster": -1, "label": -1}
+        best_th = {"kw": {}, "cluster": {}, "label": {}}
         best_val = {"kw": None, "cluster": None, "label": None}
-        for th in range(60, 70, 2):
+        best_th.pop("kw"); best_th.pop("label")
+        best_val.pop("kw"); best_val.pop("label")
+        for th in range(60, 80, 2):
             current_th = th / 100
             res = {
                 "kw":evaluate_vectors_on_corpus(current_th, keyword_vectors, label2id, path, args.model_name, "token", keywordid2labelid, model, dataloader),
@@ -829,27 +832,57 @@ def main():
                 "label":evaluate_vectors_on_corpus(current_th, label_vectors, label2id, path, args.model_name, "token", model=model, dataloader=dataloader)
                 }
             for method in best_th:
-                if best_val[method] is None or best_val[method]['f1'] < res[method]['f1']:
-                    best_val[method] = res[method].copy()
-                    best_th[method] = current_th
-        print(best_th, best_val)
-        input()
+                if best_val[method] is None:
+                    best_val[method] = res[method]["others"].copy()
+                    best_th[method] = {k:current_th for k in res[method]["others"]}
+                else:
+                    for event_type, best_type_result in best_val[method].items():
+                        type_result = res[method]['others'][event_type]
+                        f1 = type_result[2] * 2 / max(1, type_result[2] + type_result[1])
+                        best_f1 = best_type_result[2] * 2 / max(1, best_type_result[2] + best_type_result[1])
+                        if f1 > best_f1:
+                            best_val[method][event_type] = type_result
+                            best_th[method][event_type] = current_th
+        overall_best = {
+            method: [
+                sum([t[0] for t in best_val[method].values()]),
+                sum([t[1] for t in best_val[method].values()]),
+                sum([t[2] for t in best_val[method].values()])
+            ] for method in best_val
+        }
+        overall_best = {
+            method: {
+                'precision': v[2] / max(1, v[1]),
+                'recall': v[2] / max(1, v[0]),
+                'f1': v[2] * 2 / max(1, v[0] + v[1])
+            } for method, v in overall_best.items()
+        }
+        best_val = {
+            method: {
+                type: {
+                'precision': score[2] / max(1, score[1]),
+                'recall': score[2] / max(1, score[0]),
+                'f1': score[2] * 2 / max(1, score[0] + score[1])
+                } for type, score in type_score.items()
+            } for method, type_score in best_val.items() 
+        }
+        print(best_th, best_val, overall_best)
     else:
         best_th = {"kw": args.threshold, "cluster": args.threshold, "label": args.threshold}
 
     print("start annotating")
 
 
-    # if args.force or not os.path.exists(os.path.join(args.output_save_dir, f"weakly_supervised_data_kw.jsonl")):
-    #     if tokenizer is None:
-    #         tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    #     if model is None:
-    #         model = AutoModel.from_pretrained(args.model_name)
-    #     annotations = keyword_matching(0, prepared_corpus, keyword_vectors, keywordid2label, label2id, data_sentences=data_sentences, th=best_th['kw'], uth=best_th['kw'], model_name=args.model_name, model=model, tokenizer=tokenizer)
+    if args.force or not os.path.exists(os.path.join(args.output_save_dir, f"weakly_supervised_data_kw.jsonl")):
+        if tokenizer is None:
+            tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+        if model is None:
+            model = AutoModel.from_pretrained(args.model_name)
+        annotations = keyword_matching(0, prepared_corpus, keyword_vectors, keywordid2label, label2id, data_sentences=data_sentences, th=best_th['kw'], uth=best_th['kw'], model_name=args.model_name, model=model, tokenizer=tokenizer)
 
-    #     with open(os.path.join(args.output_save_dir, f"weakly_supervised_data_kw.jsonl"), "wt") as fp:
-    #         for annotation in tqdm(annotations):
-    #             fp.write(json.dumps(annotation)+"\n")
+        with open(os.path.join(args.output_save_dir, f"weakly_supervised_data_kw.jsonl"), "wt") as fp:
+            for annotation in tqdm(annotations):
+                fp.write(json.dumps(annotation)+"\n")
 
     if args.force or not os.path.exists(os.path.join(args.output_save_dir, f"weakly_supervised_data_cluster.jsonl")):
         if tokenizer is None:
@@ -857,7 +890,7 @@ def main():
         if model is None:
             model = AutoModel.from_pretrained(args.model_name)
         data_sentences = _preprocess_func(args.train_file)
-        annotations = keyword_matching(0, prepared_corpus, cluster_vectors, clusterid2label, label2id, data_sentences=data_sentences, th=best_th['cluster'], uth=best_th['kw'], model_name=args.model_name, model=model, tokenizer=tokenizer)
+        annotations = keyword_matching(0, prepared_corpus, cluster_vectors, clusterid2label, label2id, data_sentences=data_sentences, th=best_th['cluster'], uth=best_th['cluster'], model_name=args.model_name, model=model, tokenizer=tokenizer)
 
         with open(os.path.join(args.output_save_dir, f"weakly_supervised_data_cluster.jsonl"), "wt") as fp:
             for annotation in tqdm(annotations):
