@@ -1,4 +1,4 @@
-# Zero-shot IE
+# Efficient Event Extraction with a Few Keywords and Examples.
 
 # Generate Weakly Supervised Training Data
 `python generate_weakly_supervised_data.py --"proper-args"` arguments explained below. There is a newer version with minor updates (different from the one used in paper) `generate_weakly_supervised_data_v2.py` with the same set of arguments.
