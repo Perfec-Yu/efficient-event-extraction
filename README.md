@@ -15,3 +15,5 @@
 
 `python run_train.py --example-regularization --weak-annotation kw --root <root_dir>` arguments explained below.
 - `--root`, a directory containing a `./data` subdirectory, which contains the `data/label_info.json`, `data/example_json` and generated weakly supervised data named `weakly_supervised_data_kw.jsonl`. A development file and test file (named `dev/test.char.jsonl` respectively) is required and the script will run evaluation on them. if no such files are available you can simply duplicate and rename the weakly supervised training file.
+
+The trained model will be saved at `./log`.
