@@ -19,7 +19,7 @@ def define_arguments(parser):
     parser.add_argument('--example-training', action="store_true", help="")
     parser.add_argument('--example-ratio', type=float, default=1., help="")
     parser.add_argument('--example-validation', action="store_true", help="")
-    parser.add_argument('--dataset', choices=['ace', "ere"], default='ace', help="")
+    parser.add_argument('--dataset', choices=['ace', "ere", "data"], default='data', help="")
     parser.add_argument('--weak-corpus', choices=["ace", "ere", "none"], default='ace', help="")
     parser.add_argument('--weak-annotation', choices=['kw', "label", "cluster"], default='label', help="")
     parser.add_argument('--gpu', type=str, default='0', help="gpu")
